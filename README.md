@@ -1,73 +1,90 @@
-# Web Content Q&A Tool
+# Advanced RAG Q&A Tool with Mistral and Stella
 
-This web-based tool allows users to:
-1. Input one or more URLs to ingest their content
-2. Ask questions about that content
-3. View concise, accurate answers using only the ingested information
+An advanced Retrieval-Augmented Generation (RAG) system for answering questions based on web content. The system uses Mistral for inference via Ollama and Stella 400M for embeddings.
 
 ## Features
 
-- Simple, clean UI built with Streamlit
-- URL content scraping with BeautifulSoup
-- Semantic search and retrieval using LangChain and FAISS
-- OpenAI-powered Q&A system that answers based only on the provided content
+- **Fully Asynchronous**: All components run asynchronously for better performance
+- **Advanced RAG Techniques**:
+  - Semantic reranking of retrieved documents
+  - Query expansion for better recall
+  - Hypothetical document embeddings
+  - Configurable chunking and retrieval parameters
+- **Local Inference**: Uses Mistral via Ollama for 100% local inference
+- **Stella 400M Embeddings**: High-quality sentence embeddings
+- **User-Friendly Interface**: Built with Streamlit
+
+## Architecture
+
+- **Web Scraping**: Extracts clean content from URLs using readability and BeautifulSoup
+- **Embeddings**: Creates semantic embeddings using Stella 400M
+- **Vector Storage**: Indexes documents with FAISS
+- **Retrieval**: Advanced techniques including query expansion and semantic reranking
+- **Inference**: Local inference with Mistral via Ollama
 
 ## Setup Instructions
 
 ### Prerequisites
-- Python 3.9+ installed
-- OpenAI API key
+- Docker and Docker Compose (for easy setup)
+- OR Python 3.9+ with the required packages
 
-### Installation
+### Docker Setup (Recommended)
 
-1. Clone this repository:
+1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/web-content-qa-tool.git
-cd web-content-qa-tool
+git clone https://github.com/yourusername/advanced-rag-qa.git
+cd advanced-rag-qa
 ```
 
-2. Install dependencies:
+2. Start with Docker Compose:
+```bash
+docker-compose up -d
+```
+
+3. Access the application at: http://localhost:8501
+
+### Manual Setup
+
+1. Install Ollama:
+   - Follow instructions at [ollama.ai](https://ollama.ai)
+   - Pull the Mistral model: `ollama pull mistral`
+
+2. Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Set up your OpenAI API key:
-   - Create a `.env` file in the project root directory
-   - Add your OpenAI API key to the `.env` file:
-     ```
-     OPENAI_API_KEY=your-api-key-here
-     ```
-
-### Running the Application
-
-1. Start the Streamlit app:
+3. Run the application:
 ```bash
 streamlit run app.py
 ```
 
-2. Open your browser and navigate to the URL shown in your terminal (typically http://localhost:8501)
-
 ## Usage
 
-1. Enter a URL in the input field and click "Add URL"
-2. Add as many URLs as needed
-3. Type your question in the text area
-4. Click "Ask Question" to get an answer based only on the content from the provided URLs
+1. Enter one or more URLs in the interface
+2. Configure RAG parameters in the sidebar if needed
+3. Ask questions about the content
+4. View answers and optionally see the retrieved chunks
+
+## Advanced Configuration
+
+The system can be fine-tuned with these parameters:
+
+- **Retrieval K**: Number of chunks to retrieve (2-10)
+- **Chunk Size**: Size of text chunks (500-2000)
+- **Chunk Overlap**: Overlap between chunks (0-500)
+- **Semantic Reranking**: Enable/disable reranking of chunks
 
 ## Project Structure
 
 - `app.py`: Main Streamlit application
-- `scraper.py`: Web content scraping functionality
-- `agent.py`: Q&A agent using LangChain and OpenAI
-- `requirements.txt`: Project dependencies
-- `.env`: Environment variables (create this file locally)
-
-## Limitations
-
-- The tool only answers based on the content from the provided URLs
-- Some websites may block scraping attempts
-- Complex or dynamic web pages may not be scraped correctly
-- Large amounts of content may require more processing time
+- `agent.py`: RAG agent implementation
+- `embedding.py`: Stella 400M embeddings wrapper
+- `reranker.py`: Semantic reranking module
+- `query_expansion.py`: Query expansion techniques
+- `prompts.py`: Advanced RAG prompts
+- `scraper.py`: Asynchronous web scraper
+- `utils.py`: Utility functions
 
 ## License
 

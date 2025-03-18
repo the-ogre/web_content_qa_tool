@@ -1,46 +1,92 @@
 import os
 import logging
-from langchain_openai import OpenAIEmbeddings
+import asyncio
+import json
+from typing import List, Dict, Any, Tuple, Optional
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI
+from langchain_community.llms import Ollama
 from langchain.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-import tiktoken
+from langchain_core.documents import Document
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+
+from embedding import LocalEmbeddings
+from reranker import SemanticReranker
+from query_expansion import QueryExpander
+from prompts import get_answer_prompt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class Agent:
-    def __init__(self, contents):
+class AsyncAgent:
+    """Asynchronous RAG agent using advanced retrieval techniques"""
+    
+    def __init__(self, contents: Dict[str, str], rag_config: Dict[str, Any] = None):
         """
-        Initialize the Agent with web content.
+        Initialize the agent with content and configuration
         
         Args:
-            contents (dict): Dictionary mapping URLs to their text content
+            contents (Dict[str, str]): Dictionary mapping URLs to their text content
+            rag_config (Dict[str, Any], optional): RAG configuration parameters
         """
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-            
         self.contents = contents
+        self.rag_config = rag_config or {
+            "retrieval_k": 5,
+            "chunk_size": 1000,
+            "chunk_overlap": 200,
+            "rerank_enabled": True
+        }
+        
+        self.ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.embeddings = None
         self.vector_store = None
-        self.retriever = None
-        self.chain = None
+        self.reranker = None
+        self.query_expander = None
         
-        # Initialize the agent components
-        self._setup_vector_store()
-        self._setup_chain()
+        # Asyncio locks to prevent concurrent access to shared resources
+        self.init_lock = asyncio.Lock()
         
-    def _setup_vector_store(self):
-        """Set up the vector store with all content"""
+        # Track initialization status
+        self.is_initialized = False
+    
+    async def initialize(self):
+        """Initialize agent components asynchronously"""
+        if self.is_initialized:
+            return
+            
+        async with self.init_lock:
+            if self.is_initialized:
+                return
+                
+            try:
+                logger.info("Initializing embeddings model...")
+                self.embeddings = LocalEmbeddings()
+                
+                logger.info("Initializing vector store...")
+                await self._setup_vector_store()
+                
+                logger.info("Initializing reranker...")
+                self.reranker = SemanticReranker(ollama_base_url=self.ollama_base_url)
+                
+                logger.info("Initializing query expander...")
+                self.query_expander = QueryExpander(ollama_base_url=self.ollama_base_url)
+                
+                self.is_initialized = True
+                logger.info("Agent initialization complete")
+                
+            except Exception as e:
+                logger.error(f"Error during agent initialization: {str(e)}")
+                raise
+    
+    async def _setup_vector_store(self):
+        """Set up vector store with content"""
         try:
             # Text splitter for chunking
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
+                chunk_size=self.rag_config["chunk_size"],
+                chunk_overlap=self.rag_config["chunk_overlap"]
             )
             
             # Process all documents
@@ -51,83 +97,132 @@ class Agent:
             
             logger.info(f"Created {len(documents)} chunks from {len(self.contents)} URLs")
             
-            # Set up embeddings and vector store
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-ada-002",
-                openai_api_key=self.openai_api_key
+            # Get embeddings for all documents
+            texts = [doc.page_content for doc in documents]
+            embeddings_list = await self.embeddings.aembed_documents(texts)
+            
+            # Create FAISS index
+            self.vector_store = FAISS.from_embeddings(
+                text_embeddings=list(zip(texts, embeddings_list)),
+                embedding=self.embeddings,
+                metadatas=[doc.metadata for doc in documents]
             )
             
-            self.vector_store = FAISS.from_documents(documents, embeddings)
-            self.retriever = self.vector_store.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 5}
-            )
-            
-            logger.info("Vector store and retriever successfully initialized")
+            logger.info("Vector store created successfully")
             
         except Exception as e:
             logger.error(f"Error setting up vector store: {str(e)}")
             raise
     
-    def _setup_chain(self):
-        """Set up the QA chain"""
+    async def update_content(self, contents: Dict[str, str], rag_config: Dict[str, Any] = None):
+        """
+        Update content and reinitialize vector store
+        
+        Args:
+            contents (Dict[str, str]): Dictionary mapping URLs to their text content
+            rag_config (Dict[str, Any], optional): RAG configuration parameters
+        """
+        self.contents = contents
+        if rag_config:
+            self.rag_config = rag_config
+            
+        self.is_initialized = False
+        await self.initialize()
+    
+    async def _retrieve_documents(self, query: str) -> List[Document]:
+        """
+        Retrieve relevant documents for the query
+        
+        Args:
+            query (str): User query
+            
+        Returns:
+            List[Document]: Retrieved documents
+        """
         try:
-            # Create LLM
-            llm = ChatOpenAI(
-                temperature=0,
-                model="gpt-3.5-turbo-16k",
-                openai_api_key=self.openai_api_key
+            # Embed the query
+            query_embedding = await self.embeddings.aembed_query(query)
+            
+            # Retrieve documents
+            k = self.rag_config["retrieval_k"]
+            docs = self.vector_store.similarity_search_by_vector(
+                query_embedding, k=k
             )
             
-            # Set up prompt template
-            prompt = ChatPromptTemplate.from_template("""
-            You are a helpful question-answering assistant. Your task is to answer the user's question based ONLY on 
-            the provided context. If the answer cannot be found in the context, say "I don't have enough information 
-            to answer this question based on the provided content." Do not use any external knowledge.
+            # Extract just the documents
+            docs = [doc for doc, score in docs_and_scores]
             
-            Context:
-            {context}
+            # Rerank if enabled
+            if self.rag_config["rerank_enabled"] and self.reranker is not None:
+                docs = await self.reranker.rerank(query, docs)
             
-            Question:
-            {input}
-            
-            Answer:
-            """)
-            
-            # Create document chain
-            question_answer_chain = create_stuff_documents_chain(llm, prompt)
-            
-            # Create retrieval chain
-            self.chain = create_retrieval_chain(self.retriever, question_answer_chain)
-            
-            logger.info("QA chain successfully initialized")
+            return docs
             
         except Exception as e:
-            logger.error(f"Error setting up QA chain: {str(e)}")
-            raise
+            logger.error(f"Error retrieving documents: {str(e)}")
+            return []
     
-    def answer_question(self, question):
+    async def answer_question(self, question: str) -> Tuple[str, List[Document]]:
         """
-        Answer a question based on the web content
+        Answer a question using advanced RAG techniques
         
         Args:
             question (str): The question to answer
             
         Returns:
-            str: The answer based on the web content
+            Tuple[str, List[Document]]: The answer and retrieved documents
         """
+        # Make sure the agent is initialized
+        await self.initialize()
+        
         try:
-            if not self.chain:
-                raise ValueError("QA chain not initialized. Please check your API key and initialization.")
-                
-            logger.info(f"Processing question: {question}")
+            # Expand the query if query expander is available
+            if self.query_expander:
+                query_variations = await self.query_expander.generate_query_variations(question)
+                logger.info(f"Generated {len(query_variations)} query variations")
+            else:
+                query_variations = [question]
             
-            response = self.chain.invoke({"input": question})
-            answer = response.get("answer", "Unable to generate an answer.")
+            # Retrieve documents for each query variation
+            all_docs = []
+            for query in query_variations:
+                docs = await self._retrieve_documents(query)
+                all_docs.extend(docs)
             
-            logger.info(f"Generated answer for question: {question}")
-            return answer
+            # Remove duplicates while preserving order
+            unique_docs = []
+            seen_contents = set()
+            for doc in all_docs:
+                if doc.page_content not in seen_contents:
+                    seen_contents.add(doc.page_content)
+                    unique_docs.append(doc)
+            
+            # Limit to top K documents to avoid context overflow
+            top_docs = unique_docs[:self.rag_config["retrieval_k"]]
+            
+            logger.info(f"Retrieved {len(top_docs)} unique documents")
+            
+            # Initialize LLM
+            llm = Ollama(model="mistral", base_url=self.ollama_base_url)
+            
+            # Get answer prompt
+            prompt = get_answer_prompt()
+            
+            # Create LCEL chain
+            rag_chain = (
+                {"context": lambda x: x, "question": RunnablePassthrough()}
+                | prompt
+                | llm
+                | StrOutputParser()
+            )
+            
+            # Generate answer
+            answer = await rag_chain.ainvoke(top_docs)
+            
+            logger.info(f"Generated answer of length {len(answer)}")
+            return answer, top_docs
             
         except Exception as e:
             logger.error(f"Error answering question: {str(e)}")
-            raise
+            error_msg = f"An error occurred while generating the answer: {str(e)}"
+            return error_msg, []
